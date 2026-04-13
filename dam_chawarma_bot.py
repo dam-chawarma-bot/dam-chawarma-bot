@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+DAM CHAWARMA - Bot Telegram v2 - Boutons cliquables
+"""
 
 import logging
 import sqlite3
-import asyncio
-from datetime import datetime, date, timedelta
-
+from datetime import datetime, date
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ConversationHandler, filters, ContextTypes
 )
 
-# ── CONFIG ───────────────────────────────────────────────
-TOKEN     = "REMPLACE_PAR_TON_TOKEN"
+TOKEN     = "8736305442:AAHr2vHglNqSdY3am3KrFt2qOaIU4KcKyxY"
 PATRON_ID = 932787045
 DB_PATH   = "dam_chawarma.db"
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── ETATS ────────────────────────────────────────────────
+# ── ÉTATS ─────────────────────────────────────────────────────
 CHOIX_CATEGORIE, CHOIX_PRODUIT, SAISIE_QUANTITE, CHOIX_PAIEMENT = range(4)
 
-# ── MENU ────────────────────────────────────────────────
+# ── MENU COMPLET ──────────────────────────────────────────────
 CATEGORIES = {
     "🌯 Chawarma": {
         "CHAWARMA (S)": 1000,
@@ -59,222 +59,341 @@ CATEGORIES = {
 
 MODES_PAIEMENT = ["💵 Espèces", "📱 Mobile Money", "💳 Carte"]
 
-# ── DB ───────────────────────────────────────────────────
+# ── BASE DE DONNÉES ───────────────────────────────────────────
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS ventes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT,
-            heure TEXT,
-            caissier TEXT,
-            produit TEXT,
-            quantite INTEGER,
-            prix_unit INTEGER,
-            total INTEGER,
-            paiement TEXT
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            date      TEXT NOT NULL,
+            heure     TEXT NOT NULL,
+            caissier  TEXT NOT NULL,
+            produit   TEXT NOT NULL,
+            quantite  INTEGER NOT NULL,
+            prix_unit INTEGER NOT NULL,
+            total     INTEGER NOT NULL,
+            paiement  TEXT NOT NULL
         )
     """)
     conn.commit()
     conn.close()
 
-def save_vente(caissier, produit, qte, prix, paiement):
+def save_vente(caissier, produit, quantite, prix_unit, paiement):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     now = datetime.now()
-
     c.execute("""
-        INSERT INTO ventes VALUES (NULL,?,?,?,?,?,?,?,?)
-    """, (
-        now.strftime("%Y-%m-%d"),
-        now.strftime("%H:%M"),
-        caissier,
-        produit,
-        qte,
-        prix,
-        qte * prix,
-        paiement
-    ))
-
+        INSERT INTO ventes (date, heure, caissier, produit, quantite, prix_unit, total, paiement)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (now.strftime("%Y-%m-%d"), now.strftime("%H:%M"),
+          caissier, produit, quantite, prix_unit, quantite * prix_unit, paiement))
     conn.commit()
     conn.close()
 
-def get_rapport(jour):
+def get_rapport_jour(jour=None):
+    if not jour:
+        jour = date.today().strftime("%Y-%m-%d")
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
     c.execute("SELECT SUM(total), SUM(quantite), COUNT(*) FROM ventes WHERE date=?", (jour,))
     total, qte, nb = c.fetchone()
-
-    total = total or 0
-    qte = qte or 0
-    nb = nb or 0
-
-    c.execute("SELECT produit, SUM(quantite), SUM(total) FROM ventes WHERE date=? GROUP BY produit", (jour,))
-    produits = c.fetchall()
-
+    total = total or 0; qte = qte or 0; nb = nb or 0
+    c.execute("SELECT produit, SUM(quantite), SUM(total) FROM ventes WHERE date=? GROUP BY produit ORDER BY SUM(total) DESC", (jour,))
+    par_produit = c.fetchall()
     c.execute("SELECT paiement, SUM(total) FROM ventes WHERE date=? GROUP BY paiement", (jour,))
-    paiements = c.fetchall()
-
+    par_paiement = c.fetchall()
+    c.execute("SELECT caissier, SUM(total), COUNT(*) FROM ventes WHERE date=? GROUP BY caissier", (jour,))
+    par_caissier = c.fetchall()
     conn.close()
+    return {"jour": jour, "total": total, "qte": qte, "nb": nb,
+            "par_produit": par_produit, "par_paiement": par_paiement, "par_caissier": par_caissier}
 
-    return total, qte, nb, produits, paiements
+def get_last_ventes(n=5):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT heure, caissier, produit, quantite, total, paiement FROM ventes ORDER BY id DESC LIMIT ?", (n,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
-def fmt(n):
-    return f"{int(n):,}".replace(",", " ") + " FCFA"
+def fmt(n): return f"{int(n):,}".replace(",", " ") + " FCFA"
 
-# ── KEYBOARDS ────────────────────────────────────────────
+# ── KEYBOARD CATÉGORIES ───────────────────────────────────────
 def kb_categories():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(c, callback_data=f"cat:{c}")]
-        for c in CATEGORIES
-    ])
+    buttons = [[InlineKeyboardButton(cat, callback_data=f"cat:{cat}")]
+               for cat in CATEGORIES.keys()]
+    buttons.append([InlineKeyboardButton("❌ Annuler", callback_data="annuler")])
+    return InlineKeyboardMarkup(buttons)
 
-def kb_produits(cat):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{n} — {fmt(p)}", callback_data=f"prod:{n}:{p}")]
-        for n, p in CATEGORIES[cat].items()
-    ])
+def kb_produits(categorie):
+    produits = CATEGORIES.get(categorie, {})
+    buttons = []
+    for nom, prix in produits.items():
+        buttons.append([InlineKeyboardButton(
+            f"{nom}  —  {fmt(prix)}", callback_data=f"prod:{nom}:{prix}"
+        )])
+    buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data="retour_cat")])
+    buttons.append([InlineKeyboardButton("❌ Annuler", callback_data="annuler")])
+    return InlineKeyboardMarkup(buttons)
 
 def kb_paiement():
+    buttons = [[InlineKeyboardButton(m, callback_data=f"pay:{m}")] for m in MODES_PAIEMENT]
+    buttons.append([InlineKeyboardButton("❌ Annuler", callback_data="annuler")])
+    return InlineKeyboardMarkup(buttons)
+
+def kb_confirmation(produit, qte, prix, total):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(m, callback_data=f"pay:{m}")]
-        for m in MODES_PAIEMENT
+        [InlineKeyboardButton("✅ Confirmer", callback_data="confirmer")],
+        [InlineKeyboardButton("🔄 Changer quantité", callback_data="changer_qte")],
+        [InlineKeyboardButton("❌ Annuler", callback_data="annuler")],
     ])
 
-# ── VENTE ────────────────────────────────────────────────
+# ── COMMANDES ─────────────────────────────────────────────────
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    nom = update.effective_user.first_name
+    uid = update.effective_user.id
+    if uid == PATRON_ID:
+        msg = (f"👑 Bienvenue patron *{nom}* !\n\n"
+               "🌯 *DAM CHAWARMA — Bot de suivi des ventes*\n\n"
+               "Vos commandes :\n"
+               "🛒 /vente — Enregistrer une vente\n"
+               "📊 /rapport — Rapport du jour\n"
+               "🏆 /top — Top produits\n"
+               "💰 /solde — CA en temps réel\n"
+               "📋 /dernieres — 5 dernières ventes\n"
+               "❓ /aide — Aide")
+    else:
+        msg = (f"👋 Bonjour *{nom}* !\n\n"
+               "🌯 *DAM CHAWARMA*\n\n"
+               "Tape /vente pour enregistrer une vente\n"
+               "Tape /aide pour de l'aide")
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def aide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 *Comment saisir une vente :*\n\n"
+        "1️⃣ Tape /vente\n"
+        "2️⃣ Choisis la *catégorie* (Chawarma, Plats...)\n"
+        "3️⃣ Choisis le *produit* — le prix s'affiche automatiquement\n"
+        "4️⃣ Tape la *quantité*\n"
+        "5️⃣ Choisis le *mode de paiement*\n"
+        "6️⃣ Confirme ✅\n\n"
+        "C'est tout ! 🎉", parse_mode="Markdown")
+
+# ── CONVERSATION VENTE ────────────────────────────────────────
 async def vente_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🛒 Nouvelle vente\nChoisis catégorie :",
+        "🛒 *Nouvelle vente*\n\nChoisis la catégorie :",
+        parse_mode="Markdown",
         reply_markup=kb_categories()
     )
     return CHOIX_CATEGORIE
 
-async def choix_categorie(update: Update, ctx):
-    q = update.callback_query
-    await q.answer()
+async def choix_categorie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    cat = q.data.replace("cat:", "")
-    ctx.user_data["cat"] = cat
+    if query.data == "annuler":
+        await query.edit_message_text("❌ Vente annulée.")
+        return ConversationHandler.END
 
-    await q.edit_message_text("Choisis produit :", reply_markup=kb_produits(cat))
+    categorie = query.data.replace("cat:", "")
+    ctx.user_data["categorie"] = categorie
+
+    await query.edit_message_text(
+        f"🛒 Catégorie : *{categorie}*\n\nChoisis le produit :",
+        parse_mode="Markdown",
+        reply_markup=kb_produits(categorie)
+    )
     return CHOIX_PRODUIT
 
-async def choix_produit(update: Update, ctx):
-    q = update.callback_query
-    await q.answer()
+async def choix_produit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    _, produit, prix = q.data.split(":")
+    if query.data == "annuler":
+        await query.edit_message_text("❌ Vente annulée.")
+        return ConversationHandler.END
+
+    if query.data == "retour_cat":
+        await query.edit_message_text(
+            "🛒 *Nouvelle vente*\n\nChoisis la catégorie :",
+            parse_mode="Markdown",
+            reply_markup=kb_categories()
+        )
+        return CHOIX_CATEGORIE
+
+    _, produit, prix = query.data.split(":")
     ctx.user_data["produit"] = produit
     ctx.user_data["prix"] = int(prix)
 
-    await q.edit_message_text("Quantité ?")
+    await query.edit_message_text(
+        f"✅ *{produit}*\n"
+        f"💰 Prix : *{fmt(int(prix))}*\n\n"
+        f"🔢 Combien d'unités vendues ?",
+        parse_mode="Markdown"
+    )
     return SAISIE_QUANTITE
 
-async def saisie_quantite(update: Update, ctx):
-    qte = int(update.message.text)
-    ctx.user_data["qte"] = qte
+async def saisie_quantite(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        qte = int(update.message.text.strip())
+        if qte <= 0: raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Entre un nombre valide (1, 2, 3...)")
+        return SAISIE_QUANTITE
 
+    ctx.user_data["quantite"] = qte
     produit = ctx.user_data["produit"]
-    prix = ctx.user_data["prix"]
+    prix    = ctx.user_data["prix"]
+    total   = qte * prix
 
     await update.message.reply_text(
-        f"{produit} × {qte}\nPaiement ?",
+        f"💳 *Mode de paiement ?*\n\n"
+        f"📦 {produit} × {qte}\n"
+        f"💵 Total : *{fmt(total)}*",
+        parse_mode="Markdown",
         reply_markup=kb_paiement()
     )
     return CHOIX_PAIEMENT
 
-# ── VALIDATION VENTE ─────────────────────────────────────
-async def choix_paiement(update: Update, ctx):
-    q = update.callback_query
-    await q.answer()
+async def choix_paiement(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    paiement = q.data.replace("pay:", "")
+    if query.data == "annuler":
+        await query.edit_message_text("❌ Vente annulée.")
+        return ConversationHandler.END
 
-    produit = ctx.user_data["produit"]
-    qte = ctx.user_data["qte"]
-    prix = ctx.user_data["prix"]
-
+    paiement = query.data.replace("pay:", "")
+    produit  = ctx.user_data["produit"]
+    qte      = ctx.user_data["quantite"]
+    prix     = ctx.user_data["prix"]
+    total    = qte * prix
     caissier = update.effective_user.first_name
 
     save_vente(caissier, produit, qte, prix, paiement)
 
-    keyboard = [
-        [InlineKeyboardButton("➕ Nouvelle vente", callback_data="new_vente")]
-    ]
-
-    await q.edit_message_text(
-        f"✅ Vente enregistrée\n{produit} × {qte}\nTotal : {fmt(qte*prix)}",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(
+        f"✅ *Vente enregistrée !*\n\n"
+        f"🍽️ {produit}\n"
+        f"📦 Quantité : {qte}\n"
+        f"💰 Prix unit : {fmt(prix)}\n"
+        f"💵 *Total : {fmt(total)}*\n"
+        f"💳 {paiement}\n"
+        f"👤 {caissier}\n"
+        f"🕐 {datetime.now().strftime('%H:%M')}",
+        parse_mode="Markdown"
     )
+
+    # Notification patron
+    if update.effective_user.id != PATRON_ID:
+        try:
+            await ctx.bot.send_message(
+                chat_id=PATRON_ID,
+                text=(f"🔔 *Nouvelle vente !*\n\n"
+                      f"🍽️ {produit} × {qte}\n"
+                      f"💵 *{fmt(total)}*\n"
+                      f"💳 {paiement}\n"
+                      f"👤 {caissier}\n"
+                      f"🕐 {datetime.now().strftime('%H:%M')}"),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.warning(f"Notif patron échouée : {e}")
 
     return ConversationHandler.END
 
-async def nouvelle_vente(update: Update, ctx):
-    q = update.callback_query
-    await q.answer()
+async def vente_annuler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Vente annulée.")
+    return ConversationHandler.END
 
-    await q.message.reply_text(
-        "🛒 Nouvelle vente\nChoisis catégorie :",
-        reply_markup=kb_categories()
+# ── COMMANDES PATRON ──────────────────────────────────────────
+async def rapport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    r = get_rapport_jour()
+    if r["nb"] == 0:
+        await update.message.reply_text("📊 Aucune vente aujourd'hui.")
+        return
+    lignes_p = "".join(f"  • {n} ×{q} = {fmt(t)}\n" for n, q, t in r["par_produit"])
+    lignes_pay = "".join(f"  • {m} : {fmt(t)}\n" for m, t in r["par_paiement"])
+    lignes_c = "".join(f"  • {c} : {fmt(t)} ({n} ventes)\n" for c, t, n in r["par_caissier"])
+    await update.message.reply_text(
+        f"📊 *RAPPORT — {r['jour']}*\n{'─'*28}\n\n"
+        f"💵 CA TOTAL : *{fmt(r['total'])}*\n"
+        f"🎫 Tickets : {r['nb']}\n"
+        f"📦 Articles : {r['qte']}\n\n"
+        f"🍽️ *PAR PRODUIT :*\n{lignes_p}\n"
+        f"💳 *PAR PAIEMENT :*\n{lignes_pay}\n"
+        f"👤 *PAR CAISSIER :*\n{lignes_c}",
+        parse_mode="Markdown"
     )
 
-    return CHOIX_CATEGORIE
+async def solde(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    r = get_rapport_jour()
+    await update.message.reply_text(
+        f"💰 *CA EN TEMPS RÉEL*\n\n"
+        f"📅 {r['jour']}  🕐 {datetime.now().strftime('%H:%M')}\n\n"
+        f"💵 *{fmt(r['total'])}*\n"
+        f"🎫 {r['nb']} vente(s)",
+        parse_mode="Markdown"
+    )
 
-# ── RAPPORT AUTO ─────────────────────────────────────────
-async def rapport_auto(app):
-    while True:
-        now = datetime.now()
+async def top(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    r = get_rapport_jour()
+    if not r["par_produit"]:
+        await update.message.reply_text("🏆 Aucune vente aujourd'hui.")
+        return
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    lignes = "".join(
+        f"{medals[i] if i < len(medals) else '▪️'} {n}\n   → {q} vendu(s) | {fmt(t)}\n"
+        for i, (n, q, t) in enumerate(r["par_produit"][:5])
+    )
+    await update.message.reply_text(
+        f"🏆 *TOP PRODUITS — {r['jour']}*\n\n{lignes}",
+        parse_mode="Markdown"
+    )
 
-        if now.hour == 2 and now.minute == 30:
+async def dernieres(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    rows = get_last_ventes(5)
+    if not rows:
+        await update.message.reply_text("📋 Aucune vente enregistrée.")
+        return
+    lignes = "".join(
+        f"🕐 {h} | {p} ×{q} = {fmt(t)} — {c}\n"
+        for h, c, p, q, t, pay in rows
+    )
+    await update.message.reply_text(
+        f"📋 *5 DERNIÈRES VENTES*\n\n{lignes}",
+        parse_mode="Markdown"
+    )
 
-            # gestion jour (vente nuit)
-            if now.hour < 5:
-                jour = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-            else:
-                jour = now.strftime("%Y-%m-%d")
-
-            total, qte, nb, produits, paiements = get_rapport(jour)
-
-            msg = f"📊 RAPPORT {jour}\n\nCA : {fmt(total)}\nVentes : {nb}"
-
-            await app.bot.send_message(chat_id=PATRON_ID, text=msg)
-
-            await asyncio.sleep(60)
-
-        await asyncio.sleep(30)
-
-# ── MAIN ────────────────────────────────────────────────
+# ── MAIN ──────────────────────────────────────────────────────
 def main():
     init_db()
-
     app = Application.builder().token(TOKEN).build()
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("vente", vente_start)],
         states={
             CHOIX_CATEGORIE: [CallbackQueryHandler(choix_categorie)],
-            CHOIX_PRODUIT: [CallbackQueryHandler(choix_produit)],
-            SAISIE_QUANTITE: [MessageHandler(filters.TEXT, saisie_quantite)],
-            CHOIX_PAIEMENT: [CallbackQueryHandler(choix_paiement)],
+            CHOIX_PRODUIT:   [CallbackQueryHandler(choix_produit)],
+            SAISIE_QUANTITE: [MessageHandler(filters.TEXT & ~filters.COMMAND, saisie_quantite)],
+            CHOIX_PAIEMENT:  [CallbackQueryHandler(choix_paiement)],
         },
-        fallbacks=[]
+        fallbacks=[CommandHandler("annuler", vente_annuler)],
     )
 
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("aide", aide))
     app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(nouvelle_vente, pattern="new_vente"))
+    app.add_handler(CommandHandler("rapport", rapport))
+    app.add_handler(CommandHandler("solde", solde))
+    app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("dernieres", dernieres))
 
-    async def run():
-        await app.initialize()
-        await app.start()
-
-        asyncio.create_task(rapport_auto(app))
-
-        await app.updater.start_polling()
-
-    import asyncio
-    asyncio.run(run())
+    logger.info("DAM CHAWARMA Bot v2 demarré !")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
