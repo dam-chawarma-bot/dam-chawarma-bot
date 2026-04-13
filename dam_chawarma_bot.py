@@ -28,17 +28,19 @@ CATEGORIES = {
     "🌯 Chawarma": {
         "CHAWARMA (S)": 1000,
         "CHAWARMA (M)": 1500,
-        "CHAWARMA (L)": 2000,
+        "CHAWARMA (P)": 2000,
     },
     "🍝 Plats": {
         "SPAGUETTI (S)": 500,
-        "SPAGUETTI (M)": 1000,
+        "SPAGUETTI (P)": 1000,
         "INDOMIE": 500,
         "FRITES": 1000,
     },
     "🍮 Desserts": {
         "DEGUE (S)": 300,
-        "DEGUE (L)": 500,
+        "DEGUE (S) emporté": 350,
+        "DEGUE (P)": 500,
+        "DEGUE (P) emporté": 500,
     },
     "🥤 Boissons": {
         "YOUKI PLASTIQUE": 400,
@@ -55,9 +57,16 @@ CATEGORIES = {
         "PILS": 500,
         "BEAUFORT": 600,
     },
+    "💳 EMBALLAGES ET DIVERS": {
+        "PLAT JETABLE": 100,
+        "VERRE JETABLE": 50,
+        "OEUF": 100,
+        "SAUCISSE": 100,
+        "MAYONNAISE": 100,
+    },
 }
 
-MODES_PAIEMENT = ["💵 Espèces", "📱 Mobile Money", "💳 Carte"]
+MODES_PAIEMENT = ["💵 Espèces", "📱 Mobile Money"]
 
 # ── BASE DE DONNÉES ───────────────────────────────────────────
 def init_db():
