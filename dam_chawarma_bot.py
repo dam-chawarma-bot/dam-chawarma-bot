@@ -1,58 +1,58 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-DAM CHAWARMA - Bot Telegram de suivi des ventes
-"""
 
 import logging
 import sqlite3
-import os
-from datetime import datetime, date
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from datetime import datetime, date, timedelta, time
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    ConversationHandler, filters, ContextTypes
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ConversationHandler, filters, ContextTypes
 )
 
-# ── CONFIG ────────────────────────────────────────────────────
-TOKEN      = "8736305442:AAHr2vHglNqSdY3am3KrFt2qOaIU4KcKyxY"
-PATRON_ID  = 932787045
-DB_PATH    = "dam_chawarma.db"
+TOKEN     = "REMPLACE_PAR_TON_TOKEN"
+PATRON_ID = 932787045
+DB_PATH   = "dam_chawarma.db"
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── ÉTATS CONVERSATION ────────────────────────────────────────
-PRODUIT, QUANTITE, PRIX, PAIEMENT = range(4)
+CHOIX_CATEGORIE, CHOIX_PRODUIT, SAISIE_QUANTITE, CHOIX_PAIEMENT = range(4)
 
-# ── MENU ──────────────────────────────────────────────────────
-MENU = {
-    "CHAWARMA (S)": 1000,
-    "CHAWARMA (M)": 1500,
-    "CHAWARMA (L)": 2000,
-    "SPAGUETTI (S)": 500,
-    "SPAGUETTI (M)": 1000,
-    "INDOMIE": 500,
-    "FRITES": 1000,
-    "DEGUE (S)": 300,
-    "DEGUE (L)": 500,
-    "YOUKI PLASTIQUE": 400,
-    "COCA COLA PLASTIQUE": 300,
-    "COCA COLA CANETTE": 350,
-    "PETITE BENINOISE": 350,
-    "DESPERADOS": 600,
-    "DOPPEL": 600,
-    "FLAG": 600,
-    "MALTA": 400,
-    "PILS": 500,
-    "BEAUFORT": 600,
-    "EAU DE COCO": 450,
+CATEGORIES = {
+    "🌯 Chawarma": {
+        "CHAWARMA (S)": 1000,
+        "CHAWARMA (M)": 1500,
+        "CHAWARMA (L)": 2000,
+    },
+    "🍝 Plats": {
+        "SPAGUETTI (S)": 500,
+        "SPAGUETTI (M)": 1000,
+        "INDOMIE": 500,
+        "FRITES": 1000,
+    },
+    "🍮 Desserts": {
+        "DEGUE (S)": 300,
+        "DEGUE (L)": 500,
+    },
+    "🥤 Boissons": {
+        "YOUKI PLASTIQUE": 400,
+        "COCA COLA PLASTIQUE": 300,
+        "COCA COLA CANETTE": 350,
+        "EAU DE COCO": 450,
+        "MALTA": 400,
+    },
+    "🍺 Bières": {
+        "PETITE BENINOISE": 350,
+        "DESPERADOS": 600,
+        "DOPPEL": 600,
+        "FLAG": 600,
+        "PILS": 500,
+        "BEAUFORT": 600,
+    },
 }
 
-MODES_PAIEMENT = ["Espèces", "Mobile Money", "Carte"]
+MODES_PAIEMENT = ["💵 Espèces", "📱 Mobile Money", "💳 Carte"]
 
 # ── BASE DE DONNÉES ───────────────────────────────────────────
 def init_db():
@@ -60,15 +60,15 @@ def init_db():
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS ventes (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            date        TEXT NOT NULL,
-            heure       TEXT NOT NULL,
-            caissier    TEXT NOT NULL,
-            produit     TEXT NOT NULL,
-            quantite    INTEGER NOT NULL,
-            prix_unit   INTEGER NOT NULL,
-            total       INTEGER NOT NULL,
-            paiement    TEXT NOT NULL
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,
+            heure TEXT,
+            caissier TEXT,
+            produit TEXT,
+            quantite INTEGER,
+            prix_unit INTEGER,
+            total INTEGER,
+            paiement TEXT
         )
     """)
     conn.commit()
@@ -79,374 +79,198 @@ def save_vente(caissier, produit, quantite, prix_unit, paiement):
     c = conn.cursor()
     now = datetime.now()
     c.execute("""
-        INSERT INTO ventes (date, heure, caissier, produit, quantite, prix_unit, total, paiement)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ventes VALUES (NULL,?,?,?,?,?,?,?,?)
     """, (
         now.strftime("%Y-%m-%d"),
         now.strftime("%H:%M"),
-        caissier,
-        produit,
-        quantite,
-        prix_unit,
-        quantite * prix_unit,
-        paiement
+        caissier, produit, quantite,
+        prix_unit, quantite * prix_unit, paiement
     ))
     conn.commit()
     conn.close()
 
-def get_rapport_jour(jour=None):
-    if not jour:
-        jour = date.today().strftime("%Y-%m-%d")
+def get_rapport_jour(jour):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Total général
+
     c.execute("SELECT SUM(total), SUM(quantite), COUNT(*) FROM ventes WHERE date=?", (jour,))
-    total, qte_total, nb_tickets = c.fetchone()
+    total, qte, nb = c.fetchone()
     total = total or 0
-    qte_total = qte_total or 0
-    nb_tickets = nb_tickets or 0
-    # Par produit
-    c.execute("""
-        SELECT produit, SUM(quantite), SUM(total)
-        FROM ventes WHERE date=?
-        GROUP BY produit ORDER BY SUM(total) DESC
-    """, (jour,))
+    qte = qte or 0
+    nb = nb or 0
+
+    c.execute("SELECT produit, SUM(quantite), SUM(total) FROM ventes WHERE date=? GROUP BY produit", (jour,))
     par_produit = c.fetchall()
-    # Par mode paiement
-    c.execute("""
-        SELECT paiement, SUM(total)
-        FROM ventes WHERE date=?
-        GROUP BY paiement
-    """, (jour,))
+
+    c.execute("SELECT paiement, SUM(total) FROM ventes WHERE date=? GROUP BY paiement", (jour,))
     par_paiement = c.fetchall()
-    # Par caissier
-    c.execute("""
-        SELECT caissier, SUM(total), COUNT(*)
-        FROM ventes WHERE date=?
-        GROUP BY caissier
-    """, (jour,))
-    par_caissier = c.fetchall()
+
     conn.close()
+
     return {
         "jour": jour,
         "total": total,
-        "qte_total": qte_total,
-        "nb_tickets": nb_tickets,
+        "qte": qte,
+        "nb": nb,
         "par_produit": par_produit,
-        "par_paiement": par_paiement,
-        "par_caissier": par_caissier,
+        "par_paiement": par_paiement
     }
 
-def get_last_ventes(n=5):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        SELECT heure, caissier, produit, quantite, total, paiement
-        FROM ventes ORDER BY id DESC LIMIT ?
-    """, (n,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-# ── HELPERS ───────────────────────────────────────────────────
 def fmt(n):
     return f"{int(n):,}".replace(",", " ") + " FCFA"
 
-def is_patron(user_id):
-    return user_id == PATRON_ID
+# ── CLAVIERS ──────────────────────────────────────────────────
+def kb_categories():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(cat, callback_data=f"cat:{cat}")]
+        for cat in CATEGORIES
+    ])
 
-def keyboard_produits():
-    items = list(MENU.keys())
-    rows = [items[i:i+2] for i in range(0, len(items), 2)]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True)
+def kb_produits(cat):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{n} — {fmt(p)}", callback_data=f"prod:{n}:{p}")]
+        for n, p in CATEGORIES[cat].items()
+    ])
 
-def keyboard_paiement():
-    return ReplyKeyboardMarkup([MODES_PAIEMENT], resize_keyboard=True, one_time_keyboard=True)
+def kb_paiement():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(m, callback_data=f"pay:{m}")]
+        for m in MODES_PAIEMENT
+    ])
 
-# ── COMMANDES GÉNÉRALES ───────────────────────────────────────
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    uid  = user.id
-    nom  = user.first_name
-
-    if is_patron(uid):
-        msg = (
-            f"👑 Bienvenue patron *{nom}* !\n\n"
-            "🌯 *DAM CHAWARMA — Bot de suivi des ventes*\n\n"
-            "Vos commandes :\n"
-            "🛒 /vente — Enregistrer une vente\n"
-            "📊 /rapport — Rapport du jour\n"
-            "🏆 /top — Top produits du jour\n"
-            "💰 /solde — Chiffre d'affaires en temps réel\n"
-            "📋 /dernières — 5 dernières ventes\n"
-            "❓ /aide — Aide"
-        )
-    else:
-        msg = (
-            f"👋 Bonjour *{nom}* !\n\n"
-            "🌯 *DAM CHAWARMA — Saisie des ventes*\n\n"
-            "Commandes disponibles :\n"
-            "🛒 /vente — Enregistrer une vente\n"
-            "📋 /dernieres — Mes dernières ventes\n"
-            "❓ /aide — Aide"
-        )
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-async def aide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 *Guide d'utilisation*\n\n"
-        "1️⃣ Tape /vente\n"
-        "2️⃣ Choisis le produit dans le menu\n"
-        "3️⃣ Entre la quantité\n"
-        "4️⃣ Confirme ou modifie le prix\n"
-        "5️⃣ Choisis le mode de paiement\n\n"
-        "✅ La vente est enregistrée et le patron est notifié !",
-        parse_mode="Markdown"
-    )
-
-# ── CONVERSATION : SAISIR UNE VENTE ──────────────────────────
+# ── VENTE ─────────────────────────────────────────────────────
 async def vente_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🛒 *Nouvelle vente*\n\nChoisis le produit :",
+        "🛒 *Nouvelle vente*\n\nChoisis la catégorie :",
         parse_mode="Markdown",
-        reply_markup=keyboard_produits()
+        reply_markup=kb_categories()
     )
-    return PRODUIT
+    return CHOIX_CATEGORIE
 
-async def vente_produit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    produit = update.message.text.strip().upper()
-    # Cherche correspondance
-    match = None
-    for p in MENU:
-        if produit == p.upper():
-            match = p
-            break
-    if not match:
-        # Recherche partielle
-        for p in MENU:
-            if produit in p.upper():
-                match = p
-                break
-    if not match:
-        await update.message.reply_text(
-            "❌ Produit non reconnu. Choisis dans la liste :",
-            reply_markup=keyboard_produits()
-        )
-        return PRODUIT
+async def choix_categorie(update: Update, ctx):
+    q = update.callback_query
+    await q.answer()
+    cat = q.data.replace("cat:", "")
+    ctx.user_data["categorie"] = cat
 
-    ctx.user_data["produit"] = match
-    ctx.user_data["prix_suggest"] = MENU[match]
-    await update.message.reply_text(
-        f"✅ Produit : *{match}*\n\n🔢 Quelle quantité ?",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove()
+    await q.edit_message_text(
+        f"Catégorie : {cat}\nChoisis produit :",
+        reply_markup=kb_produits(cat)
     )
-    return QUANTITE
+    return CHOIX_PRODUIT
 
-async def vente_quantite(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    try:
-        qte = int(update.message.text.strip())
-        if qte <= 0: raise ValueError
-    except ValueError:
-        await update.message.reply_text("❌ Entre un nombre valide (ex: 1, 2, 3...)")
-        return QUANTITE
+async def choix_produit(update: Update, ctx):
+    q = update.callback_query
+    await q.answer()
 
+    _, produit, prix = q.data.split(":")
+    ctx.user_data["produit"] = produit
+    ctx.user_data["prix"] = int(prix)
+
+    await q.edit_message_text(f"{produit}\nQuantité ?")
+    return SAISIE_QUANTITE
+
+async def saisie_quantite(update: Update, ctx):
+    qte = int(update.message.text)
     ctx.user_data["quantite"] = qte
-    prix = ctx.user_data["prix_suggest"]
-    await update.message.reply_text(
-        f"💰 Prix unitaire :\n"
-        f"Prix catalogue : *{fmt(prix)}*\n\n"
-        f"Tape le prix ou envoie *OK* pour confirmer {fmt(prix)}",
-        parse_mode="Markdown"
-    )
-    return PRIX
 
-async def vente_prix(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    txt = update.message.text.strip().upper()
-    if txt == "OK":
-        prix = ctx.user_data["prix_suggest"]
-    else:
-        try:
-            prix = int(txt.replace(" ", "").replace("FCFA", ""))
-            if prix <= 0: raise ValueError
-        except ValueError:
-            await update.message.reply_text("❌ Entre un prix valide ou tape OK")
-            return PRIX
-
-    ctx.user_data["prix"] = prix
-    qte   = ctx.user_data["quantite"]
+    produit = ctx.user_data["produit"]
+    prix = ctx.user_data["prix"]
     total = qte * prix
+
     await update.message.reply_text(
-        f"💳 Mode de paiement ?\n\n"
-        f"Sous-total : *{fmt(total)}*",
-        parse_mode="Markdown",
-        reply_markup=keyboard_paiement()
+        f"{produit} × {qte}\nTotal : {fmt(total)}\nPaiement ?",
+        reply_markup=kb_paiement()
     )
-    return PAIEMENT
+    return CHOIX_PAIEMENT
 
-async def vente_paiement(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    paiement = update.message.text.strip()
-    if paiement not in MODES_PAIEMENT:
-        await update.message.reply_text(
-            "❌ Choisis parmi les options :",
-            reply_markup=keyboard_paiement()
-        )
-        return PAIEMENT
+# 🔥 AVEC BOUTON NOUVELLE VENTE
+async def choix_paiement(update: Update, ctx):
+    q = update.callback_query
+    await q.answer()
 
-    produit  = ctx.user_data["produit"]
-    quantite = ctx.user_data["quantite"]
-    prix     = ctx.user_data["prix"]
-    total    = quantite * prix
+    paiement = q.data.replace("pay:", "")
+    produit = ctx.user_data["produit"]
+    qte = ctx.user_data["quantite"]
+    prix = ctx.user_data["prix"]
+    total = qte * prix
     caissier = update.effective_user.first_name
 
-    save_vente(caissier, produit, quantite, prix, paiement)
+    save_vente(caissier, produit, qte, prix, paiement)
 
-    # Confirmation au caissier
-    await update.message.reply_text(
-        f"✅ *Vente enregistrée !*\n\n"
-        f"🍽️ {produit}\n"
-        f"📦 Quantité : {quantite}\n"
-        f"💰 Prix unit : {fmt(prix)}\n"
-        f"💵 Total : *{fmt(total)}*\n"
-        f"💳 Paiement : {paiement}\n"
-        f"👤 Caissier : {caissier}\n"
-        f"🕐 {datetime.now().strftime('%H:%M')}",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove()
+    keyboard = [[InlineKeyboardButton("➕ Nouvelle vente", callback_data="new_vente")]]
+
+    await q.edit_message_text(
+        f"✅ Vente enregistrée\n\n{produit} × {qte}\n{fmt(total)}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
-    # Notification au patron
-    if update.effective_user.id != PATRON_ID:
-        try:
-            await ctx.bot.send_message(
-                chat_id=PATRON_ID,
-                text=(
-                    f"🔔 *Nouvelle vente !*\n\n"
-                    f"🍽️ {produit} × {quantite}\n"
-                    f"💵 *{fmt(total)}*\n"
-                    f"💳 {paiement}\n"
-                    f"👤 {caissier}\n"
-                    f"🕐 {datetime.now().strftime('%H:%M')}"
-                ),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logger.warning(f"Notification patron échouée : {e}")
 
     return ConversationHandler.END
 
-async def vente_annuler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "❌ Saisie annulée.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return ConversationHandler.END
+async def nouvelle_vente(update: Update, ctx):
+    q = update.callback_query
+    await q.answer()
 
-# ── COMMANDES PATRON ──────────────────────────────────────────
-async def rapport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    r = get_rapport_jour()
-
-    if r["nb_tickets"] == 0:
-        await update.message.reply_text("📊 Aucune vente enregistrée aujourd'hui.")
-        return
-
-    # Par produit
-    lignes_produits = ""
-    for nom, qte, total in r["par_produit"]:
-        lignes_produits += f"  • {nom} × {qte} = {fmt(total)}\n"
-
-    # Par paiement
-    lignes_paiement = ""
-    for mode, total in r["par_paiement"]:
-        lignes_paiement += f"  • {mode} : {fmt(total)}\n"
-
-    # Par caissier
-    lignes_caissier = ""
-    for caissier, total, nb in r["par_caissier"]:
-        lignes_caissier += f"  • {caissier} : {fmt(total)} ({nb} ventes)\n"
-
-    msg = (
-        f"📊 *RAPPORT DU JOUR — {r['jour']}*\n"
-        f"{'─'*30}\n\n"
-        f"💵 CA TOTAL : *{fmt(r['total'])}*\n"
-        f"🎫 Tickets : {r['nb_tickets']}\n"
-        f"📦 Articles vendus : {r['qte_total']}\n\n"
-        f"🍽️ *PAR PRODUIT :*\n{lignes_produits}\n"
-        f"💳 *PAR PAIEMENT :*\n{lignes_paiement}\n"
-        f"👤 *PAR CAISSIER :*\n{lignes_caissier}"
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-async def solde(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    r = get_rapport_jour()
-    heure = datetime.now().strftime("%H:%M")
-    await update.message.reply_text(
-        f"💰 *CHIFFRE D'AFFAIRES EN TEMPS RÉEL*\n\n"
-        f"📅 {r['jour']}  🕐 {heure}\n\n"
-        f"💵 *{fmt(r['total'])}*\n\n"
-        f"🎫 {r['nb_tickets']} vente(s) enregistrée(s)",
-        parse_mode="Markdown"
+    await q.message.reply_text(
+        "🛒 Nouvelle vente\nChoisis la catégorie :",
+        reply_markup=kb_categories()
     )
 
-async def top(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    r = get_rapport_jour()
-    if not r["par_produit"]:
-        await update.message.reply_text("🏆 Aucune vente aujourd'hui.")
-        return
+    return CHOIX_CATEGORIE
 
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-    lignes = ""
-    for i, (nom, qte, total) in enumerate(r["par_produit"][:5]):
-        m = medals[i] if i < len(medals) else "▪️"
-        lignes += f"{m} {nom}\n   → {qte} vendu(s) | {fmt(total)}\n"
+# ── RAPPORT AUTO ──────────────────────────────────────────────
+async def rapport_auto(ctx: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now()
 
-    await update.message.reply_text(
-        f"🏆 *TOP PRODUITS — {r['jour']}*\n\n{lignes}",
-        parse_mode="Markdown"
-    )
+    if now.hour < 5:
+        jour = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        jour = now.strftime("%Y-%m-%d")
 
-async def dernieres(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    rows = get_last_ventes(5)
-    if not rows:
-        await update.message.reply_text("📋 Aucune vente enregistrée.")
-        return
+    r = get_rapport_jour(jour)
 
-    lignes = ""
-    for heure, caissier, produit, qte, total, paiement in rows:
-        lignes += f"🕐 {heure} | {produit} ×{qte} = {fmt(total)} ({caissier})\n"
+    if r["nb"] == 0:
+        message = f"Aucune vente pour {jour}"
+    else:
+        produits = "\n".join(f"{n} x{q} = {fmt(t)}" for n, q, t in r["par_produit"])
+        paiements = "\n".join(f"{m} : {fmt(t)}" for m, t in r["par_paiement"])
 
-    await update.message.reply_text(
-        f"📋 *5 DERNIÈRES VENTES*\n\n{lignes}",
-        parse_mode="Markdown"
-    )
+        message = (
+            f"📊 RAPPORT {jour}\n\n"
+            f"CA : {fmt(r['total'])}\n"
+            f"Ventes : {r['nb']}\n\n"
+            f"{produits}\n\n{paiements}"
+        )
+
+    await ctx.bot.send_message(chat_id=PATRON_ID, text=message)
 
 # ── MAIN ──────────────────────────────────────────────────────
 def main():
     init_db()
     app = Application.builder().token(TOKEN).build()
 
-    # Conversation vente
     conv = ConversationHandler(
         entry_points=[CommandHandler("vente", vente_start)],
         states={
-            PRODUIT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, vente_produit)],
-            QUANTITE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, vente_quantite)],
-            PRIX:      [MessageHandler(filters.TEXT & ~filters.COMMAND, vente_prix)],
-            PAIEMENT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, vente_paiement)],
+            CHOIX_CATEGORIE: [CallbackQueryHandler(choix_categorie)],
+            CHOIX_PRODUIT: [CallbackQueryHandler(choix_produit)],
+            SAISIE_QUANTITE: [MessageHandler(filters.TEXT, saisie_quantite)],
+            CHOIX_PAIEMENT: [CallbackQueryHandler(choix_paiement)],
         },
-        fallbacks=[CommandHandler("annuler", vente_annuler)],
+        fallbacks=[],
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("aide", aide))
     app.add_handler(conv)
-    app.add_handler(CommandHandler("rapport", rapport))
-    app.add_handler(CommandHandler("solde", solde))
-    app.add_handler(CommandHandler("top", top))
-    app.add_handler(CommandHandler("dernieres", dernieres))
+    app.add_handler(CallbackQueryHandler(nouvelle_vente, pattern="new_vente"))
 
-    logger.info("🌯 DAM CHAWARMA Bot démarré !")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # 🔥 RAPPORT AUTOMATIQUE À 02H30
+    app.job_queue.run_daily(
+        rapport_auto,
+        time=time(hour=2, minute=30)
+    )
+
+    print("Bot lancé 🚀")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
