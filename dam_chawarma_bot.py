@@ -3,22 +3,27 @@
 
 import logging
 import sqlite3
-from datetime import datetime, date, timedelta, time
+import asyncio
+from datetime import datetime, date, timedelta
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ConversationHandler, filters, ContextTypes
 )
 
+# ── CONFIG ───────────────────────────────────────────────
 TOKEN     = "REMPLACE_PAR_TON_TOKEN"
 PATRON_ID = 932787045
 DB_PATH   = "dam_chawarma.db"
 
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ── ETATS ────────────────────────────────────────────────
 CHOIX_CATEGORIE, CHOIX_PRODUIT, SAISIE_QUANTITE, CHOIX_PAIEMENT = range(4)
 
+# ── MENU ────────────────────────────────────────────────
 CATEGORIES = {
     "🌯 Chawarma": {
         "CHAWARMA (S)": 1000,
@@ -54,7 +59,7 @@ CATEGORIES = {
 
 MODES_PAIEMENT = ["💵 Espèces", "📱 Mobile Money", "💳 Carte"]
 
-# ── BASE DE DONNÉES ───────────────────────────────────────────
+# ── DB ───────────────────────────────────────────────────
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -74,56 +79,56 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_vente(caissier, produit, quantite, prix_unit, paiement):
+def save_vente(caissier, produit, qte, prix, paiement):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     now = datetime.now()
+
     c.execute("""
         INSERT INTO ventes VALUES (NULL,?,?,?,?,?,?,?,?)
     """, (
         now.strftime("%Y-%m-%d"),
         now.strftime("%H:%M"),
-        caissier, produit, quantite,
-        prix_unit, quantite * prix_unit, paiement
+        caissier,
+        produit,
+        qte,
+        prix,
+        qte * prix,
+        paiement
     ))
+
     conn.commit()
     conn.close()
 
-def get_rapport_jour(jour):
+def get_rapport(jour):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
     c.execute("SELECT SUM(total), SUM(quantite), COUNT(*) FROM ventes WHERE date=?", (jour,))
     total, qte, nb = c.fetchone()
+
     total = total or 0
     qte = qte or 0
     nb = nb or 0
 
     c.execute("SELECT produit, SUM(quantite), SUM(total) FROM ventes WHERE date=? GROUP BY produit", (jour,))
-    par_produit = c.fetchall()
+    produits = c.fetchall()
 
     c.execute("SELECT paiement, SUM(total) FROM ventes WHERE date=? GROUP BY paiement", (jour,))
-    par_paiement = c.fetchall()
+    paiements = c.fetchall()
 
     conn.close()
 
-    return {
-        "jour": jour,
-        "total": total,
-        "qte": qte,
-        "nb": nb,
-        "par_produit": par_produit,
-        "par_paiement": par_paiement
-    }
+    return total, qte, nb, produits, paiements
 
 def fmt(n):
     return f"{int(n):,}".replace(",", " ") + " FCFA"
 
-# ── CLAVIERS ──────────────────────────────────────────────────
+# ── KEYBOARDS ────────────────────────────────────────────
 def kb_categories():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(cat, callback_data=f"cat:{cat}")]
-        for cat in CATEGORIES
+        [InlineKeyboardButton(c, callback_data=f"cat:{c}")]
+        for c in CATEGORIES
     ])
 
 def kb_produits(cat):
@@ -138,11 +143,10 @@ def kb_paiement():
         for m in MODES_PAIEMENT
     ])
 
-# ── VENTE ─────────────────────────────────────────────────────
+# ── VENTE ────────────────────────────────────────────────
 async def vente_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🛒 *Nouvelle vente*\n\nChoisis la catégorie :",
-        parse_mode="Markdown",
+        "🛒 Nouvelle vente\nChoisis catégorie :",
         reply_markup=kb_categories()
     )
     return CHOIX_CATEGORIE
@@ -150,13 +154,11 @@ async def vente_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def choix_categorie(update: Update, ctx):
     q = update.callback_query
     await q.answer()
-    cat = q.data.replace("cat:", "")
-    ctx.user_data["categorie"] = cat
 
-    await q.edit_message_text(
-        f"Catégorie : {cat}\nChoisis produit :",
-        reply_markup=kb_produits(cat)
-    )
+    cat = q.data.replace("cat:", "")
+    ctx.user_data["cat"] = cat
+
+    await q.edit_message_text("Choisis produit :", reply_markup=kb_produits(cat))
     return CHOIX_PRODUIT
 
 async def choix_produit(update: Update, ctx):
@@ -167,41 +169,43 @@ async def choix_produit(update: Update, ctx):
     ctx.user_data["produit"] = produit
     ctx.user_data["prix"] = int(prix)
 
-    await q.edit_message_text(f"{produit}\nQuantité ?")
+    await q.edit_message_text("Quantité ?")
     return SAISIE_QUANTITE
 
 async def saisie_quantite(update: Update, ctx):
     qte = int(update.message.text)
-    ctx.user_data["quantite"] = qte
+    ctx.user_data["qte"] = qte
 
     produit = ctx.user_data["produit"]
     prix = ctx.user_data["prix"]
-    total = qte * prix
 
     await update.message.reply_text(
-        f"{produit} × {qte}\nTotal : {fmt(total)}\nPaiement ?",
+        f"{produit} × {qte}\nPaiement ?",
         reply_markup=kb_paiement()
     )
     return CHOIX_PAIEMENT
 
-# 🔥 AVEC BOUTON NOUVELLE VENTE
+# ── VALIDATION VENTE ─────────────────────────────────────
 async def choix_paiement(update: Update, ctx):
     q = update.callback_query
     await q.answer()
 
     paiement = q.data.replace("pay:", "")
+
     produit = ctx.user_data["produit"]
-    qte = ctx.user_data["quantite"]
+    qte = ctx.user_data["qte"]
     prix = ctx.user_data["prix"]
-    total = qte * prix
+
     caissier = update.effective_user.first_name
 
     save_vente(caissier, produit, qte, prix, paiement)
 
-    keyboard = [[InlineKeyboardButton("➕ Nouvelle vente", callback_data="new_vente")]]
+    keyboard = [
+        [InlineKeyboardButton("➕ Nouvelle vente", callback_data="new_vente")]
+    ]
 
     await q.edit_message_text(
-        f"✅ Vente enregistrée\n\n{produit} × {qte}\n{fmt(total)}",
+        f"✅ Vente enregistrée\n{produit} × {qte}\nTotal : {fmt(qte*prix)}",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -212,41 +216,39 @@ async def nouvelle_vente(update: Update, ctx):
     await q.answer()
 
     await q.message.reply_text(
-        "🛒 Nouvelle vente\nChoisis la catégorie :",
+        "🛒 Nouvelle vente\nChoisis catégorie :",
         reply_markup=kb_categories()
     )
 
     return CHOIX_CATEGORIE
 
-# ── RAPPORT AUTO ──────────────────────────────────────────────
-async def rapport_auto(ctx: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now()
+# ── RAPPORT AUTO ─────────────────────────────────────────
+async def rapport_auto(app):
+    while True:
+        now = datetime.now()
 
-    if now.hour < 5:
-        jour = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    else:
-        jour = now.strftime("%Y-%m-%d")
+        if now.hour == 2 and now.minute == 30:
 
-    r = get_rapport_jour(jour)
+            # gestion jour (vente nuit)
+            if now.hour < 5:
+                jour = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            else:
+                jour = now.strftime("%Y-%m-%d")
 
-    if r["nb"] == 0:
-        message = f"Aucune vente pour {jour}"
-    else:
-        produits = "\n".join(f"{n} x{q} = {fmt(t)}" for n, q, t in r["par_produit"])
-        paiements = "\n".join(f"{m} : {fmt(t)}" for m, t in r["par_paiement"])
+            total, qte, nb, produits, paiements = get_rapport(jour)
 
-        message = (
-            f"📊 RAPPORT {jour}\n\n"
-            f"CA : {fmt(r['total'])}\n"
-            f"Ventes : {r['nb']}\n\n"
-            f"{produits}\n\n{paiements}"
-        )
+            msg = f"📊 RAPPORT {jour}\n\nCA : {fmt(total)}\nVentes : {nb}"
 
-    await ctx.bot.send_message(chat_id=PATRON_ID, text=message)
+            await app.bot.send_message(chat_id=PATRON_ID, text=msg)
 
-# ── MAIN ──────────────────────────────────────────────────────
+            await asyncio.sleep(60)
+
+        await asyncio.sleep(30)
+
+# ── MAIN ────────────────────────────────────────────────
 def main():
     init_db()
+
     app = Application.builder().token(TOKEN).build()
 
     conv = ConversationHandler(
@@ -257,20 +259,22 @@ def main():
             SAISIE_QUANTITE: [MessageHandler(filters.TEXT, saisie_quantite)],
             CHOIX_PAIEMENT: [CallbackQueryHandler(choix_paiement)],
         },
-        fallbacks=[],
+        fallbacks=[]
     )
 
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(nouvelle_vente, pattern="new_vente"))
 
-    # 🔥 RAPPORT AUTOMATIQUE À 02H30
-    app.job_queue.run_daily(
-        rapport_auto,
-        time=time(hour=2, minute=30)
-    )
+    async def run():
+        await app.initialize()
+        await app.start()
 
-    print("Bot lancé 🚀")
-    app.run_polling()
+        asyncio.create_task(rapport_auto(app))
+
+        await app.updater.start_polling()
+
+    import asyncio
+    asyncio.run(run())
 
 if __name__ == "__main__":
     main()
