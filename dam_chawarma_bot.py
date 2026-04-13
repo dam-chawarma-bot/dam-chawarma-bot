@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-DAM CHAWARMA - Bot Telegram v2 - Boutons cliquables
+DAM CHAWARMA - Bot Telegram v3
+  - Retour automatique au formulaire après une vente
 """
 
 import logging
@@ -128,7 +129,7 @@ def get_last_ventes(n=5):
 
 def fmt(n): return f"{int(n):,}".replace(",", " ") + " FCFA"
 
-# ── KEYBOARD CATÉGORIES ───────────────────────────────────────
+# ── KEYBOARDS ─────────────────────────────────────────────────
 def kb_categories():
     buttons = [[InlineKeyboardButton(cat, callback_data=f"cat:{cat}")]
                for cat in CATEGORIES.keys()]
@@ -150,13 +151,6 @@ def kb_paiement():
     buttons = [[InlineKeyboardButton(m, callback_data=f"pay:{m}")] for m in MODES_PAIEMENT]
     buttons.append([InlineKeyboardButton("❌ Annuler", callback_data="annuler")])
     return InlineKeyboardMarkup(buttons)
-
-def kb_confirmation(produit, qte, prix, total):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Confirmer", callback_data="confirmer")],
-        [InlineKeyboardButton("🔄 Changer quantité", callback_data="changer_qte")],
-        [InlineKeyboardButton("❌ Annuler", callback_data="annuler")],
-    ])
 
 # ── COMMANDES ─────────────────────────────────────────────────
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -284,6 +278,7 @@ async def choix_paiement(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     save_vente(caissier, produit, qte, prix, paiement)
 
+    # ✅ Message de succès + bouton nouvelle vente directement visible
     await query.edit_message_text(
         f"✅ *Vente enregistrée !*\n\n"
         f"🍽️ {produit}\n"
@@ -293,7 +288,10 @@ async def choix_paiement(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"💳 {paiement}\n"
         f"👤 {caissier}\n"
         f"🕐 {datetime.now().strftime('%H:%M')}",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Enregistrer une autre vente", callback_data="nouvelle_vente")]
+        ])
     )
 
     # Notification patron
@@ -318,15 +316,26 @@ async def vente_annuler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Vente annulée.")
     return ConversationHandler.END
 
+# ✅ Handler bouton "➕ Nouvelle vente"
+async def nouvelle_vente_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🛒 *Nouvelle vente*\n\nChoisis la catégorie :",
+        parse_mode="Markdown",
+        reply_markup=kb_categories()
+    )
+    return CHOIX_CATEGORIE
+
 # ── COMMANDES PATRON ──────────────────────────────────────────
 async def rapport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     r = get_rapport_jour()
     if r["nb"] == 0:
         await update.message.reply_text("📊 Aucune vente aujourd'hui.")
         return
-    lignes_p = "".join(f"  • {n} ×{q} = {fmt(t)}\n" for n, q, t in r["par_produit"])
+    lignes_p   = "".join(f"  • {n} ×{q} = {fmt(t)}\n" for n, q, t in r["par_produit"])
     lignes_pay = "".join(f"  • {m} : {fmt(t)}\n" for m, t in r["par_paiement"])
-    lignes_c = "".join(f"  • {c} : {fmt(t)} ({n} ventes)\n" for c, t, n in r["par_caissier"])
+    lignes_c   = "".join(f"  • {c} : {fmt(t)} ({n} ventes)\n" for c, t, n in r["par_caissier"])
     await update.message.reply_text(
         f"📊 *RAPPORT — {r['jour']}*\n{'─'*28}\n\n"
         f"💵 CA TOTAL : *{fmt(r['total'])}*\n"
@@ -383,7 +392,10 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler("vente", vente_start)],
+        entry_points=[
+            CommandHandler("vente", vente_start),
+            CallbackQueryHandler(nouvelle_vente_callback, pattern="^nouvelle_vente$"),
+        ],
         states={
             CHOIX_CATEGORIE: [CallbackQueryHandler(choix_categorie)],
             CHOIX_PRODUIT:   [CallbackQueryHandler(choix_produit)],
@@ -401,7 +413,7 @@ def main():
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("dernieres", dernieres))
 
-    logger.info("DAM CHAWARMA Bot v2 demarré !")
+    logger.info("DAM CHAWARMA Bot v3 démarré !")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
