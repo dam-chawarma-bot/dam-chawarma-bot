@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-DAM CHAWARMA - Bot Telegram v3
-  - Retour automatique au formulaire après une vente
+DAM CHAWARMA - Bot Telegram v4
+  - Bouton 🔴 Enregistrer une nouvelle vente après toute annulation ou vente
 """
 
 import logging
@@ -68,6 +68,12 @@ CATEGORIES = {
 }
 
 MODES_PAIEMENT = ["💵 Espèces", "📱 Mobile Money"]
+
+# ── BOUTON RÉUTILISABLE ───────────────────────────────────────
+def kb_nouvelle_vente():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔴 Enregistrer une nouvelle vente", callback_data="nouvelle_vente")]
+    ])
 
 # ── BASE DE DONNÉES ───────────────────────────────────────────
 def init_db():
@@ -198,7 +204,10 @@ async def choix_categorie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "annuler":
-        await query.edit_message_text("❌ Vente annulée.")
+        await query.edit_message_text(
+            "❌ Vente annulée.",
+            reply_markup=kb_nouvelle_vente()
+        )
         return ConversationHandler.END
 
     categorie = query.data.replace("cat:", "")
@@ -216,7 +225,10 @@ async def choix_produit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "annuler":
-        await query.edit_message_text("❌ Vente annulée.")
+        await query.edit_message_text(
+            "❌ Vente annulée.",
+            reply_markup=kb_nouvelle_vente()
+        )
         return ConversationHandler.END
 
     if query.data == "retour_cat":
@@ -266,7 +278,10 @@ async def choix_paiement(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "annuler":
-        await query.edit_message_text("❌ Vente annulée.")
+        await query.edit_message_text(
+            "❌ Vente annulée.",
+            reply_markup=kb_nouvelle_vente()
+        )
         return ConversationHandler.END
 
     paiement = query.data.replace("pay:", "")
@@ -278,7 +293,6 @@ async def choix_paiement(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     save_vente(caissier, produit, qte, prix, paiement)
 
-    # ✅ Message de succès + bouton nouvelle vente directement visible
     await query.edit_message_text(
         f"✅ *Vente enregistrée !*\n\n"
         f"🍽️ {produit}\n"
@@ -289,9 +303,7 @@ async def choix_paiement(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"👤 {caissier}\n"
         f"🕐 {datetime.now().strftime('%H:%M')}",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Enregistrer une autre vente", callback_data="nouvelle_vente")]
-        ])
+        reply_markup=kb_nouvelle_vente()
     )
 
     # Notification patron
@@ -313,10 +325,13 @@ async def choix_paiement(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def vente_annuler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Vente annulée.")
+    await update.message.reply_text(
+        "❌ Vente annulée.",
+        reply_markup=kb_nouvelle_vente()
+    )
     return ConversationHandler.END
 
-# ✅ Handler bouton "➕ Nouvelle vente"
+# ── Handler bouton "🔴 Nouvelle vente" ────────────────────────
 async def nouvelle_vente_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -413,7 +428,7 @@ def main():
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("dernieres", dernieres))
 
-    logger.info("DAM CHAWARMA Bot v3 démarré !")
+    logger.info("DAM CHAWARMA Bot v4 démarré !")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
