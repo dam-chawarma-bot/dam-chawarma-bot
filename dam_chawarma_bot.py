@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-DAM CHAWARMA - Bot Telegram v4
+DAM CHAWARMA - Bot Telegram v5
+  - Rapport affiche d'abord le jour précédent puis le jour actuel
   - Bouton 🔴 Enregistrer une nouvelle vente après toute annulation ou vente
 """
 
 import logging
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -52,6 +53,7 @@ CATEGORIES = {
     },
     "🍺 Bières": {
         "PETITE BENINOISE": 350,
+        "PETITE CHIL": 350,
         "DESPERADOS": 600,
         "DOPPEL": 600,
         "FLAG": 600,
@@ -135,6 +137,26 @@ def get_last_ventes(n=5):
 
 def fmt(n): return f"{int(n):,}".replace(",", " ") + " FCFA"
 
+def formater_rapport(r, titre_emoji="📊"):
+    """Formate un rapport en texte prêt à envoyer."""
+    if r["nb"] == 0:
+        return (
+            f"{titre_emoji} *RAPPORT — {r['jour']}*\n{'─'*28}\n\n"
+            f"_(Aucune vente ce jour)_"
+        )
+    lignes_p   = "".join(f"  • {n} ×{q} = {fmt(t)}\n" for n, q, t in r["par_produit"])
+    lignes_pay = "".join(f"  • {m} : {fmt(t)}\n" for m, t in r["par_paiement"])
+    lignes_c   = "".join(f"  • {c} : {fmt(t)} ({n} ventes)\n" for c, t, n in r["par_caissier"])
+    return (
+        f"{titre_emoji} *RAPPORT — {r['jour']}*\n{'─'*28}\n\n"
+        f"💵 CA TOTAL : *{fmt(r['total'])}*\n"
+        f"🎫 Tickets : {r['nb']}\n"
+        f"📦 Articles : {r['qte']}\n\n"
+        f"🍽️ *PAR PRODUIT :*\n{lignes_p}\n"
+        f"💳 *PAR PAIEMENT :*\n{lignes_pay}\n"
+        f"👤 *PAR CAISSIER :*\n{lignes_c}"
+    )
+
 # ── KEYBOARDS ─────────────────────────────────────────────────
 def kb_categories():
     buttons = [[InlineKeyboardButton(cat, callback_data=f"cat:{cat}")]
@@ -167,7 +189,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                "🌯 *DAM CHAWARMA — Bot de suivi des ventes*\n\n"
                "Vos commandes :\n"
                "🛒 /vente — Enregistrer une vente\n"
-               "📊 /rapport — Rapport du jour\n"
+               "📊 /rapport — Rapport J-1 + Rapport du jour\n"
                "🏆 /top — Top produits\n"
                "💰 /solde — CA en temps réel\n"
                "📋 /dernieres — 5 dernières ventes\n"
@@ -344,23 +366,41 @@ async def nouvelle_vente_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE
 
 # ── COMMANDES PATRON ──────────────────────────────────────────
 async def rapport(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    r = get_rapport_jour()
-    if r["nb"] == 0:
-        await update.message.reply_text("📊 Aucune vente aujourd'hui.")
-        return
-    lignes_p   = "".join(f"  • {n} ×{q} = {fmt(t)}\n" for n, q, t in r["par_produit"])
-    lignes_pay = "".join(f"  • {m} : {fmt(t)}\n" for m, t in r["par_paiement"])
-    lignes_c   = "".join(f"  • {c} : {fmt(t)} ({n} ventes)\n" for c, t, n in r["par_caissier"])
-    await update.message.reply_text(
-        f"📊 *RAPPORT — {r['jour']}*\n{'─'*28}\n\n"
-        f"💵 CA TOTAL : *{fmt(r['total'])}*\n"
-        f"🎫 Tickets : {r['nb']}\n"
-        f"📦 Articles : {r['qte']}\n\n"
-        f"🍽️ *PAR PRODUIT :*\n{lignes_p}\n"
-        f"💳 *PAR PAIEMENT :*\n{lignes_pay}\n"
-        f"👤 *PAR CAISSIER :*\n{lignes_c}",
-        parse_mode="Markdown"
-    )
+    aujourd_hui = date.today().strftime("%Y-%m-%d")
+    hier        = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    r_hier = get_rapport_jour(hier)
+    r_auj  = get_rapport_jour(aujourd_hui)
+
+    # ── Rapport J-1 ──
+    texte_hier = formater_rapport(r_hier, titre_emoji="📅")
+
+    # ── Bloc comparaison CA si les deux jours ont des ventes ──
+    if r_hier["total"] > 0 and r_auj["total"] > 0:
+        diff  = r_auj["total"] - r_hier["total"]
+        pct   = (diff / r_hier["total"]) * 100
+        icone = "📈" if diff >= 0 else "📉"
+        signe = "+" if diff >= 0 else "-"
+        comparaison = (
+            f"\n{'─'*28}\n"
+            f"⚡ *ÉVOLUTION J-1 → Aujourd'hui*\n"
+            f"{icone} {signe}{fmt(abs(diff))} ({signe}{abs(pct):.1f} %)\n"
+            f"{'─'*28}\n\n"
+        )
+    else:
+        comparaison = f"\n{'─'*28}\n\n"
+
+    # ── Rapport du jour ──
+    texte_auj = formater_rapport(r_auj, titre_emoji="📊")
+
+    message_complet = texte_hier + comparaison + texte_auj
+
+    # Telegram limite les messages à 4096 caractères — on envoie en 2 si nécessaire
+    if len(message_complet) <= 4096:
+        await update.message.reply_text(message_complet, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(texte_hier, parse_mode="Markdown")
+        await update.message.reply_text(texte_auj,  parse_mode="Markdown")
 
 async def solde(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     r = get_rapport_jour()
@@ -428,7 +468,7 @@ def main():
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("dernieres", dernieres))
 
-    logger.info("DAM CHAWARMA Bot v4 démarré !")
+    logger.info("DAM CHAWARMA Bot v5 démarré !")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
